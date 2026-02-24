@@ -1,209 +1,326 @@
 local M = {}
-local backend = require("snot.backend")
-local ui = require("snot.ui")
-local picker = require("snot.picker")
 
-function M.setup(config)
-  -- NoteNew - Create a new note
-  vim.api.nvim_create_user_command("NoteNew", function(opts)
-    local name = opts.args
-    if name == "" then
-      vim.ui.input({ prompt = "Note name: " }, function(input)
-        if input then
-          M.create_note(input)
-        end
-      end)
-    else
-      M.create_note(name)
-    end
-  end, { nargs = "?", desc = "Create a new note" })
+local backend, picker, templates, utils
 
-  -- NoteFind - Open file picker
-  vim.api.nvim_create_user_command("NoteFind", function()
-    M.find_note()
-  end, { desc = "Find and open a note" })
-
-  -- NoteSearch - Search using query language
-  vim.api.nvim_create_user_command("NoteSearch", function(opts)
-    local query = opts.args
-    if query == "" then
-      vim.ui.input({ prompt = "Query: " }, function(input)
-        if input then
-          M.search_notes(input)
-        end
-      end)
-    else
-      M.search_notes(query)
-    end
-  end, { nargs = "?", desc = "Search notes using query language" })
-
-  -- NoteBacklinks - Show backlinks to current note
-  vim.api.nvim_create_user_command("NoteBacklinks", function()
-    M.show_backlinks()
-  end, { desc = "Show backlinks to current note" })
-
-  -- NoteIndex - Reindex all notes
-  vim.api.nvim_create_user_command("NoteIndex", function(opts)
-    local force = opts.bang
-    M.index_vault(force)
-  end, { bang = true, desc = "Index vault (use ! to force reindex)" })
-
-  -- NoteInit - Initialize vault
-  vim.api.nvim_create_user_command("NoteInit", function(opts)
-    local vault_path = opts.args
-    if vault_path == "" then
-      vault_path = vim.fn.getcwd()
-    end
-    M.init_vault(vault_path)
-  end, { nargs = "?", desc = "Initialize vault" })
-
-  -- NoteLink - Insert link to another note
-  vim.api.nvim_create_user_command("NoteLink", function()
-    M.insert_link()
-  end, { desc = "Insert link to another note" })
+--- Lazy-load dependencies on first dispatch.
+local function ensure_deps()
+  if not backend then
+    backend = require("snot.backend")
+    picker = require("snot.picker")
+    templates = require("snot.templates")
+    utils = require("snot.utils")
+  end
 end
 
-function M.create_note(name)
-  backend.create_note(name, function(err, result)
-    if err then
-      vim.notify("Error creating note: " .. err, vim.log.levels.ERROR)
+--- Notify an error from a backend call.
+---@param context string What we were trying to do
+---@param err string The error message
+local function notify_err(context, err)
+  vim.notify(string.format("[snot] %s: %s", context, err), vim.log.levels.ERROR)
+end
+
+--- Build picker items from note objects (with id, title, path).
+--- Note: the `path` field from the CLI is already an absolute path.
+---@param notes table[] Array of {id, title, path} objects
+---@return table[] items for picker
+local function notes_to_items(notes)
+  local items = {}
+  for _, note in ipairs(notes) do
+    table.insert(items, {
+      text = note.title .. "  (" .. note.id .. ")",
+      path = note.path,
+      data = note,
+    })
+  end
+  return items
+end
+
+-- Command handlers -------------------------------------------------------
+
+local function cmd_new(opts)
+  local title = opts.args ~= "" and opts.args or nil
+  local use_picker = opts.bang
+
+  local function create_with_template(name, template_path)
+    local content, vars = templates.render(name, template_path)
+    local config = require("snot").get_config()
+    local file_path = config.vault_path .. "/" .. vars.id .. ".md"
+
+    if vim.fn.filereadable(file_path) == 1 then
+      vim.notify("[snot] Note already exists: " .. file_path, vim.log.levels.WARN)
       return
     end
 
-    -- Open the newly created note
-    vim.cmd("edit " .. result.path)
-    vim.notify("Created note: " .. result.title, vim.log.levels.INFO)
+    -- Write file
+    local lines = vim.split(content, "\n")
+    vim.fn.writefile(lines, file_path)
+
+    -- Open the file
+    vim.cmd("edit " .. vim.fn.fnameescape(file_path))
+
+    -- Register in database
+    backend.update_note(file_path, function(err)
+      if err then
+        notify_err("Update after create", err)
+      end
+    end)
+  end
+
+  local function proceed_with_title(name)
+    if use_picker then
+      -- Pick a template first
+      local tpls = templates.list_templates()
+      if #tpls == 0 then
+        vim.notify("[snot] No templates found, using default", vim.log.levels.INFO)
+        create_with_template(name, nil)
+        return
+      end
+
+      local items = {}
+      for _, t in ipairs(tpls) do
+        table.insert(items, { text = t.name, path = t.path, data = t })
+      end
+
+      picker.pick(items, {
+        prompt = "Template",
+        on_select = function(item)
+          create_with_template(name, item.path)
+        end,
+      })
+    else
+      create_with_template(name, nil)
+    end
+  end
+
+  if title then
+    proceed_with_title(title)
+  else
+    vim.ui.input({ prompt = "Note title: " }, function(input)
+      if not input or input == "" then
+        return
+      end
+      proceed_with_title(input)
+    end)
+  end
+end
+
+local function cmd_find()
+  backend.list_notes(function(err, paths)
+    if err then
+      notify_err("List notes", err)
+      return
+    end
+
+    local items = {}
+    for _, path in ipairs(paths) do
+      local stem = utils.note_stem(path)
+      table.insert(items, {
+        text = stem .. "  (" .. path .. ")",
+        path = path,
+      })
+    end
+
+    picker.pick(items, { prompt = "Notes" })
   end)
 end
 
-function M.find_note(query)
-  backend.list_notes(query, function(err, output)
-    if err then
-      vim.notify("Error listing notes: " .. err, vim.log.levels.ERROR)
-      return
-    end
+local function cmd_search(opts)
+  local query = opts.args ~= "" and opts.args or nil
 
-    -- Convert output to list of file paths
-    local files = {}
-    for _, line in ipairs(output) do
-      if line ~= "" then
-        table.insert(files, line)
+  local function do_search(q)
+    backend.query_notes(q, function(err, notes)
+      if err then
+        notify_err("Search", err)
+        return
       end
-    end
+      picker.pick(notes_to_items(notes), { prompt = "Search: " .. q })
+    end)
+  end
 
-    if #files == 0 then
-      vim.notify("No notes found", vim.log.levels.WARN)
+  if query then
+    do_search(query)
+  else
+    vim.ui.input({ prompt = "Search query: " }, function(input)
+      if not input or input == "" then
+        return
+      end
+      do_search(input)
+    end)
+  end
+end
+
+local function cmd_backlinks()
+  local file = utils.current_file()
+  if not file then
+    vim.notify("[snot] No file in current buffer", vim.log.levels.WARN)
+    return
+  end
+
+  backend.get_backlinks(file, function(err, notes)
+    if err then
+      notify_err("Backlinks", err)
+      return
+    end
+    picker.pick(notes_to_items(notes), { prompt = "Backlinks" })
+  end)
+end
+
+local function cmd_index(opts)
+  local force = opts.bang
+  backend.index_vault(force, function(err, output)
+    if err then
+      notify_err("Index", err)
+      return
+    end
+    vim.notify("[snot] " .. output, vim.log.levels.INFO)
+  end)
+end
+
+local function cmd_tags()
+  backend.list_tags(function(err, tags)
+    if err then
+      notify_err("Tags", err)
       return
     end
 
-    -- Use picker (FZF, Telescope, or vim.ui.select)
-    picker.pick(files, {
-      prompt = "Find Note> ",
-      preview_command = "cat {}",
+    local items = {}
+    for _, tag in ipairs(tags) do
+      table.insert(items, { text = tag })
+    end
+
+    picker.pick(items, {
+      prompt = "Tags",
+      on_select = function(item)
+        -- Re-search with the selected tag
+        backend.query_notes("tag:" .. item.text, function(search_err, notes)
+          if search_err then
+            notify_err("Tag search", search_err)
+            return
+          end
+          picker.pick(notes_to_items(notes), { prompt = "tag:" .. item.text })
+        end)
+      end,
     })
   end)
 end
 
-function M.search_notes(query)
-  backend.query_notes(query, function(err, results)
-    if err then
-      vim.notify("Error searching notes: " .. err, vim.log.levels.ERROR)
-      return
-    end
+local function cmd_graph(opts)
+  local subcmd = opts.args ~= "" and opts.args or "neighbors"
 
-    if #results == 0 then
-      vim.notify("No notes found", vim.log.levels.WARN)
-      return
-    end
-
-    ui.show_results(results, "Search Results: " .. query)
-  end)
-end
-
-function M.show_backlinks()
-  local file_path = vim.fn.expand("%:p")
-
-  backend.get_backlinks(file_path, function(err, results)
-    if err then
-      vim.notify("Error getting backlinks: " .. err, vim.log.levels.ERROR)
-      return
-    end
-
-    if #results == 0 then
-      vim.notify("No backlinks found", vim.log.levels.INFO)
-      return
-    end
-
-    ui.show_results(results, "Backlinks")
-  end)
-end
-
-function M.index_vault(force)
-  vim.notify("Indexing vault...", vim.log.levels.INFO)
-
-  backend.index_vault(force, function(err, output)
-    if err then
-      vim.notify("Error indexing vault: " .. err, vim.log.levels.ERROR)
-      return
-    end
-
-    local message = table.concat(output, "\n")
-    vim.notify(message, vim.log.levels.INFO)
-  end)
-end
-
-function M.init_vault(vault_path)
-  backend.init_vault(vault_path, function(err, output)
-    if err then
-      vim.notify("Error initializing vault: " .. err, vim.log.levels.ERROR)
-      return
-    end
-
-    local message = table.concat(output, "\n")
-    vim.notify(message, vim.log.levels.INFO)
-  end)
-end
-
-function M.insert_link()
-  backend.list_notes(nil, function(err, output)
-    if err then
-      vim.notify("Error listing notes: " .. err, vim.log.levels.ERROR)
-      return
-    end
-
-    -- Convert output to list of file paths
-    local files = {}
-    for _, line in ipairs(output) do
-      if line ~= "" then
-        table.insert(files, line)
+  if subcmd == "stats" then
+    backend.graph_stats(function(err, stats)
+      if err then
+        notify_err("Graph stats", err)
+        return
       end
-    end
 
-    if #files == 0 then
-      vim.notify("No notes found", vim.log.levels.WARN)
+      local lines = {
+        "Graph Statistics:",
+        "  Total notes:  " .. (stats.total_notes or 0),
+        "  Linked:       " .. (stats.linked_count or 0),
+        "  Orphans:      " .. (stats.orphan_count or 0),
+      }
+      if stats.most_linked and #stats.most_linked > 0 then
+        table.insert(lines, "  Most linked:")
+        for _, entry in ipairs(stats.most_linked) do
+          table.insert(lines, "    " .. entry.title .. " (" .. entry.link_count .. " links)")
+        end
+      end
+      vim.notify(table.concat(lines, "\n"), vim.log.levels.INFO)
+    end)
+    return
+  end
+
+  if subcmd == "orphans" then
+    backend.graph_orphans(function(err, notes)
+      if err then
+        notify_err("Graph orphans", err)
+        return
+      end
+      picker.pick(notes_to_items(notes), { prompt = "Orphans" })
+    end)
+    return
+  end
+
+  -- Default: neighbors of current note
+  local file = utils.current_file()
+  if not file then
+    vim.notify("[snot] No file in current buffer", vim.log.levels.WARN)
+    return
+  end
+
+  local config = require("snot").get_config()
+  local note_id, id_err = utils.note_id_from_path(file, config.vault_path)
+  if not note_id then
+    vim.notify("[snot] " .. (id_err or "Could not determine note ID"), vim.log.levels.WARN)
+    return
+  end
+
+  backend.graph_neighbors(note_id, 2, function(err, notes)
+    if err then
+      notify_err("Graph neighbors", err)
+      return
+    end
+    picker.pick(notes_to_items(notes), { prompt = "Neighbors: " .. note_id })
+  end)
+end
+
+local function cmd_link()
+  backend.list_notes(function(err, paths)
+    if err then
+      notify_err("List notes", err)
       return
     end
 
-    -- Use picker to select a file for linking
-    picker.pick(files, {
-      prompt = "Insert Link> ",
-      preview_command = "cat {}",
-      on_select = function(selected)
-        -- Extract note name from path and create wiki link
-        local note_name = vim.fn.fnamemodify(selected, ":t:r")
-        local link = "[[" .. note_name .. "]]"
+    local items = {}
+    for _, path in ipairs(paths) do
+      local stem = utils.note_stem(path)
+      table.insert(items, {
+        text = stem .. "  (" .. path .. ")",
+        path = path,
+        data = { stem = stem },
+      })
+    end
 
-        -- Insert at cursor
+    picker.pick(items, {
+      prompt = "Insert Link",
+      on_select = function(item)
+        local link = "[[" .. item.data.stem .. "]]"
         local row, col = unpack(vim.api.nvim_win_get_cursor(0))
         local line = vim.api.nvim_get_current_line()
-        local new_line = line:sub(1, col) .. link .. line:sub(col + 1)
-        vim.api.nvim_set_current_line(new_line)
-
-        -- Move cursor to after the link
+        local before = line:sub(1, col)
+        local after = line:sub(col + 1)
+        vim.api.nvim_set_current_line(before .. link .. after)
         vim.api.nvim_win_set_cursor(0, { row, col + #link })
       end,
     })
   end)
+end
+
+-- Dispatch ---------------------------------------------------------------
+
+local handlers = {
+  new = cmd_new,
+  find = cmd_find,
+  search = cmd_search,
+  backlinks = cmd_backlinks,
+  index = cmd_index,
+  tags = cmd_tags,
+  graph = cmd_graph,
+  link = cmd_link,
+}
+
+--- Dispatch a command by name.
+---@param name string Command name
+---@param opts table Command opts from nvim_create_user_command
+function M.dispatch(name, opts)
+  ensure_deps()
+  local handler = handlers[name]
+  if not handler then
+    vim.notify("[snot] Unknown command: " .. name, vim.log.levels.ERROR)
+    return
+  end
+  handler(opts)
 end
 
 return M

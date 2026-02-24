@@ -1,132 +1,123 @@
 # snot.nvim
 
-Neovim plugin for [SNOT](https://github.com/yourusername/snot) - Simple Note Organization Tool.
-
-## Features
-
-- **Note Management**: Create, find, and search notes with fuzzy finding
-- **Wiki Links**: Auto-completion for `[[wiki-links]]`
-- **Tag Completion**: Auto-completion for `#tags`
-- **Backlinks**: View notes linking to the current note
-- **Multiple Pickers**: Support for fzf-lua, telescope, or vim.ui.select
-- **Auto-sync**: Automatically updates cache on save
+Neovim plugin for [SNOT](https://github.com/smchunn/snot) (Simple Note Organization Tool). Provides fuzzy finding, graph traversal, template-based note creation, and auto-indexing — all powered by the `snot` CLI.
 
 ## Requirements
 
-- Neovim 0.7+
-- [SNOT CLI](https://github.com/yourusername/snot) installed and in PATH
-- Optional: [fzf-lua](https://github.com/ibhagwan/fzf-lua) or [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim)
+- Neovim >= 0.10
+- [snot](https://github.com/smchunn/snot) CLI installed and on `$PATH`
+- One of: [fzf-lua](https://github.com/ibhagwan/fzf-lua), [snacks.nvim](https://github.com/folke/snacks.nvim), [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim), or built-in `vim.ui.select`
 
 ## Installation
 
-### [lazy.nvim](https://github.com/folke/lazy.nvim)
+### lazy.nvim
 
 ```lua
 {
-  'yourusername/snot.nvim',
+  "smchunn/snot.nvim",
+  dependencies = {
+    -- Pick one (or none for vim.ui.select fallback):
+    -- "ibhagwan/fzf-lua",
+    -- "folke/snacks.nvim",
+    -- "nvim-telescope/telescope.nvim",
+  },
+  cmd = { "SnotNew", "SnotFind", "SnotSearch", "SnotBacklinks", "SnotIndex", "SnotTags", "SnotGraph", "SnotLink" },
   opts = {
-    vault_path = '~/notes',       -- Path to your notes vault
-    snot_bin = 'snot',             -- Path to snot binary
-    picker = 'auto',               -- 'auto', 'fzf-lua', 'telescope', or 'select'
-    enable_completion = true,      -- Enable completion (default: true)
+    vault_path = "~/notes",
   },
-  keys = {
-    { '<leader>nn', '<cmd>NoteNew<cr>', desc = 'New note' },
-    { '<leader>nf', '<cmd>NoteFind<cr>', desc = 'Find note' },
-    { '<leader>ns', '<cmd>NoteSearch<cr>', desc = 'Search notes' },
-    { '<leader>nb', '<cmd>NoteBacklinks<cr>', desc = 'Show backlinks' },
-    { '<leader>ni', '<cmd>NoteIndex<cr>', desc = 'Index vault' },
-    { '<leader>nl', '<cmd>NoteLink<cr>', desc = 'Insert link' },
-  },
-  cmd = { 'NoteNew', 'NoteFind', 'NoteSearch', 'NoteBacklinks', 'NoteIndex', 'NoteInit', 'NoteLink' },
-  ft = 'markdown',
 }
 ```
 
-## Commands
-
-- `:NoteNew [name]` - Create a new note
-- `:NoteFind` - Find notes using picker
-- `:NoteSearch [query]` - Search notes with SQL-style queries
-- `:NoteBacklinks` - Show backlinks to current note
-- `:NoteIndex[!]` - Index vault (! to force reindex)
-- `:NoteInit [path]` - Initialize a new vault
-- `:NoteLink` - Insert a wiki-link to another note
-
-## Completion
-
-The plugin supports three completion frameworks:
-
-### Omnifunc (Built-in)
-Works out of the box. Trigger with `<C-X><C-O>` after typing `[[` or `#`.
-
-### nvim-cmp
-Auto-detected and configured if installed. No additional setup needed.
-
-### blink.cmp
-Add snot to your blink.cmp sources:
+### Local development
 
 ```lua
 {
-  'saghen/blink.cmp',
+  dir = "~/dev/snot.nvim",
+  cmd = { "SnotNew", "SnotFind", "SnotSearch", "SnotBacklinks", "SnotIndex", "SnotTags", "SnotGraph", "SnotLink" },
   opts = {
-    sources = {
-      default = { 'lsp', 'path', 'snippets', 'buffer', 'snot' },
-      providers = {
-        snot = {
-          name = 'Snot',
-          module = 'snot.completion.blink',
-          enabled = function()
-            return vim.bo.filetype == 'markdown'
-          end,
-        },
-      },
-    },
+    vault_path = "~/notes",
   },
 }
 ```
 
 ## Configuration
 
-### Default Configuration
-
 ```lua
-{
-  vault_path = vim.fn.getcwd(),  -- Current directory
-  snot_bin = 'snot',             -- snot binary in PATH
-  picker = 'auto',               -- Auto-detect picker
-  enable_completion = true,      -- Enable completion
-}
+require("snot").setup({
+  vault_path = "~/notes",        -- REQUIRED: path to your vault
+  snot_bin = "snot",             -- path to snot binary (default: "snot")
+  picker = "auto",               -- "auto" | "fzf-lua" | "snacks" | "telescope" | "select"
+  templates = {
+    dir = "templates",           -- directory inside vault for templates
+    default = "default.md",      -- default template filename
+  },
+})
 ```
 
-### Picker Options
+**Picker auto-detection order:** fzf-lua → snacks → telescope → vim.ui.select
 
-- `'auto'` - Auto-detect (tries fzf-lua, then telescope, then vim.ui.select)
-- `'fzf-lua'` - Use fzf-lua (recommended)
-- `'telescope'` - Use telescope.nvim
-- `'select'` - Use vim.ui.select (built-in)
+## Commands
+
+| Command | Args | Bang | Description |
+|---------|------|------|-------------|
+| `:SnotNew [name]` | Optional title | `!` picks template | Create a note. Prompts for name if omitted. `SnotNew!` opens template picker first. |
+| `:SnotFind` | — | — | Browse all notes, select to open |
+| `:SnotSearch [query]` | Optional query | — | Search with snot query syntax. Prompts if omitted. |
+| `:SnotBacklinks` | — | — | Show backlinks to the current note |
+| `:SnotIndex` | — | `!` forces reindex | Index the vault. `SnotIndex!` forces full reindex. |
+| `:SnotTags` | — | — | Browse tags. Selecting a tag searches for it. |
+| `:SnotGraph [sub]` | `neighbors` / `orphans` / `stats` | — | Graph operations. Default: neighbors of current note. |
+| `:SnotLink` | — | — | Pick a note and insert `[[link]]` at cursor |
 
 ## Query Syntax
 
-Search notes using SQL-style queries:
+snot supports two query syntaxes, auto-detected:
 
-```sql
--- Basic queries
-tags CONTAINS 'work'
-content LIKE '%meeting%'
-links_to = 'project-plan'
-modified_date BETWEEN '2025-01-01' AND '2025-01-31'
-
--- Boolean logic
-tags CONTAINS 'work' AND content LIKE '%deadline%'
-tags CONTAINS 'meeting' OR tags CONTAINS 'standup'
-tags CONTAINS 'work' AND NOT tags CONTAINS 'archived'
-
--- Grouping
-(tags CONTAINS 'work' OR tags CONTAINS 'personal') AND NOT tags CONTAINS 'archived'
+**Shorthand** (quick CLI use):
+```
+tag:work
+#work title:meeting
+~meting              (fuzzy)
+tag:work OR tag:personal
+-tag:archived
 ```
 
-See [Query Syntax Guide](https://github.com/yourusername/snot/blob/master/docs/query-syntax.md) for more details.
+**SQL-style** (complex queries):
+```sql
+tags CONTAINS 'work' AND title LIKE '%meeting%'
+fuzzy LIKE 'meting'
+neighbors('project-plan', 2)
+```
+
+## Templates
+
+Place `.md` files in `{vault}/templates/`. Template variables:
+
+| Variable | Example |
+|----------|---------|
+| `{{title}}` | My New Note |
+| `{{id}}` | my-new-note-2025-01-15 |
+| `{{date}}` | 2025-01-15 |
+| `{{time}}` | 14:30:00 |
+| `{{datetime}}` | 2025-01-15T14:30:00 |
+
+**Default template** (used when no template file exists):
+
+```markdown
+---
+id: {{id}}
+aliases:
+  - {{title}}
+tags: []
+---
+
+# {{title}}
+
+```
+
+## Auto-indexing
+
+When you save a markdown file inside the vault, the plugin automatically runs `snot update` to keep the database current. No manual reindexing needed for day-to-day editing.
 
 ## License
 

@@ -1,117 +1,168 @@
 local M = {}
 
--- Check if fzf-lua is available
-local function has_fzf_lua()
-  return pcall(require, "fzf-lua")
+--- Detect which picker backend is available.
+---@return "fzf-lua"|"snacks"|"telescope"|"select"
+local function detect_picker()
+  local ok
+  ok, _ = pcall(require, "fzf-lua")
+  if ok then
+    return "fzf-lua"
+  end
+  ok, _ = pcall(require, "snacks")
+  if ok then
+    return "snacks"
+  end
+  ok, _ = pcall(require, "telescope")
+  if ok then
+    return "telescope"
+  end
+  return "select"
 end
 
--- Check if telescope is available
-local function has_telescope()
-  return pcall(require, "telescope")
+--- Resolve the picker backend from config.
+---@return "fzf-lua"|"snacks"|"telescope"|"select"
+local function resolve_picker()
+  local config = require("snot").get_config()
+  if config.picker == "auto" then
+    return detect_picker()
+  end
+  return config.picker
 end
 
--- FZF-Lua picker
-local function pick_with_fzf_lua(files, opts)
+--- Pick from a list of items using the configured picker.
+---@param items { text: string, path: string?, data: any? }[]
+---@param opts { prompt?: string, on_select?: fun(item: table) }
+function M.pick(items, opts)
   opts = opts or {}
-  local fzf_lua = require("fzf-lua")
+  local prompt = opts.prompt or "Snot"
 
-  fzf_lua.fzf_exec(files, {
-    prompt = opts.prompt or "Notes> ",
-    previewer = "builtin",
+  local on_select = opts.on_select or function(item)
+    if item.path then
+      vim.cmd("edit " .. vim.fn.fnameescape(item.path))
+    end
+  end
+
+  if #items == 0 then
+    vim.notify("[snot] No results", vim.log.levels.INFO)
+    return
+  end
+
+  local backend = resolve_picker()
+
+  if backend == "fzf-lua" then
+    M._pick_fzf_lua(items, prompt, on_select)
+  elseif backend == "snacks" then
+    M._pick_snacks(items, prompt, on_select)
+  elseif backend == "telescope" then
+    M._pick_telescope(items, prompt, on_select)
+  else
+    M._pick_select(items, prompt, on_select)
+  end
+end
+
+---@private
+function M._pick_fzf_lua(items, prompt, on_select)
+  local fzf = require("fzf-lua")
+
+  -- Build display strings and a lookup table
+  local display_strings = {}
+  local lookup = {}
+  for _, item in ipairs(items) do
+    table.insert(display_strings, item.text)
+    lookup[item.text] = item
+  end
+
+  fzf.fzf_exec(display_strings, {
+    prompt = prompt .. "> ",
     actions = {
       ["default"] = function(selected)
         if selected and selected[1] then
-          if opts.on_select then
-            opts.on_select(selected[1])
-          else
-            vim.cmd("edit " .. selected[1])
+          local item = lookup[selected[1]]
+          if item then
+            on_select(item)
           end
         end
       end,
     },
-    fzf_opts = {
-      ["--preview-window"] = "right:60%:wrap",
-    },
   })
 end
 
--- Telescope picker
-local function pick_with_telescope(files, opts)
-  opts = opts or {}
+---@private
+function M._pick_snacks(items, prompt, on_select)
+  local Snacks = require("snacks")
+
+  local picker_items = {}
+  for idx, item in ipairs(items) do
+    table.insert(picker_items, {
+      idx = idx,
+      text = item.text,
+      file = item.path,
+      item = item,
+    })
+  end
+
+  Snacks.picker.pick({
+    source = "snot",
+    title = prompt,
+    items = picker_items,
+    confirm = function(picker, picker_item)
+      picker:close()
+      if picker_item and picker_item.item then
+        on_select(picker_item.item)
+      end
+    end,
+  })
+end
+
+---@private
+function M._pick_telescope(items, prompt, on_select)
   local pickers = require("telescope.pickers")
   local finders = require("telescope.finders")
   local conf = require("telescope.config").values
   local actions = require("telescope.actions")
   local action_state = require("telescope.actions.state")
 
-  pickers.new(opts, {
-    prompt_title = opts.prompt or "Notes",
-    finder = finders.new_table({
-      results = files,
-    }),
-    sorter = conf.generic_sorter(opts),
-    attach_mappings = function(prompt_bufnr, map)
-      actions.select_default:replace(function()
-        actions.close(prompt_bufnr)
-        local selection = action_state.get_selected_entry()
-        if opts.on_select then
-          opts.on_select(selection[1])
-        else
-          vim.cmd("edit " .. selection[1])
-        end
-      end)
-      return true
-    end,
-  }):find()
+  pickers
+    .new({}, {
+      prompt_title = prompt,
+      finder = finders.new_table({
+        results = items,
+        entry_maker = function(item)
+          return {
+            value = item,
+            display = item.text,
+            ordinal = item.text,
+            path = item.path,
+          }
+        end,
+      }),
+      sorter = conf.generic_sorter({}),
+      attach_mappings = function(prompt_bufnr)
+        actions.select_default:replace(function()
+          actions.close(prompt_bufnr)
+          local selection = action_state.get_selected_entry()
+          if selection then
+            on_select(selection.value)
+          end
+        end)
+        return true
+      end,
+    })
+    :find()
 end
 
--- Fallback to vim.ui.select
-local function pick_with_select(files, opts)
-  opts = opts or {}
-
-  -- Format files for display
-  local items = {}
-  for _, file in ipairs(files) do
-    local display = vim.fn.fnamemodify(file, ":t:r")
-    table.insert(items, { display = display, path = file })
-  end
-
+---@private
+function M._pick_select(items, prompt, on_select)
   vim.ui.select(items, {
-    prompt = opts.prompt or "Select note:",
+    prompt = prompt,
     format_item = function(item)
-      return item.display
+      return item.text
     end,
   }, function(choice)
     if choice then
-      if opts.on_select then
-        opts.on_select(choice.path)
-      else
-        vim.cmd("edit " .. choice.path)
-      end
+      on_select(choice)
     end
   end)
-end
-
--- Main picker function that chooses the best available picker
-function M.pick(files, opts)
-  opts = opts or {}
-
-  if #files == 0 then
-    vim.notify("No files to pick from", vim.log.levels.WARN)
-    return
-  end
-
-  -- Use configured picker if specified
-  local config = require("snot").get_config()
-  local picker_type = config.picker or "auto"
-
-  if picker_type == "fzf-lua" or picker_type == "fzf" or (picker_type == "auto" and has_fzf_lua()) then
-    pick_with_fzf_lua(files, opts)
-  elseif picker_type == "telescope" or (picker_type == "auto" and has_telescope()) then
-    pick_with_telescope(files, opts)
-  else
-    pick_with_select(files, opts)
-  end
 end
 
 return M

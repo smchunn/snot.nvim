@@ -1,125 +1,151 @@
 local M = {}
 
-local function get_vault_path()
+--- Run a snot CLI command asynchronously.
+--- Collects stdout/stderr, calls callback(err, data) on exit.
+---@param args string[] CLI arguments (after the binary name)
+---@param opts { parse_json?: boolean } Options
+---@param callback fun(err: string|nil, data: any) Called on completion
+function M.run_command(args, opts, callback)
   local config = require("snot").get_config()
-  return config.vault_path
-end
+  local cmd = vim.list_extend({ config.snot_bin }, args)
 
-local function get_snot_bin()
-  local config = require("snot").get_config()
-  return config.snot_bin
-end
+  local stdout_chunks = {}
+  local stderr_chunks = {}
 
-function M.run_command(args, callback)
-  local cmd = get_snot_bin()
-  local full_args = vim.list_extend({}, args)
-
-  local stdout = {}
-  local stderr = {}
-
-  local job_id = vim.fn.jobstart({ cmd, unpack(full_args) }, {
+  vim.fn.jobstart(cmd, {
     stdout_buffered = true,
     stderr_buffered = true,
     on_stdout = function(_, data)
       if data then
-        vim.list_extend(stdout, data)
+        vim.list_extend(stdout_chunks, data)
       end
     end,
     on_stderr = function(_, data)
       if data then
-        vim.list_extend(stderr, data)
+        vim.list_extend(stderr_chunks, data)
       end
     end,
     on_exit = function(_, exit_code)
-      if exit_code == 0 then
-        callback(nil, stdout)
-      else
-        callback(table.concat(stderr, "\n"), nil)
-      end
+      vim.schedule(function()
+        local stdout = table.concat(stdout_chunks, "\n"):gsub("\n+$", "")
+        local stderr = table.concat(stderr_chunks, "\n"):gsub("\n+$", "")
+
+        if exit_code ~= 0 then
+          local msg = stderr ~= "" and stderr or ("snot exited with code " .. exit_code)
+          callback(msg, nil)
+          return
+        end
+
+        if opts.parse_json and stdout ~= "" then
+          local ok, decoded = pcall(vim.json.decode, stdout)
+          if not ok then
+            callback("Failed to parse JSON: " .. tostring(decoded), nil)
+            return
+          end
+          callback(nil, decoded)
+        else
+          callback(nil, stdout)
+        end
+      end)
     end,
   })
-
-  return job_id
 end
 
-function M.init_vault(vault_path, callback)
-  M.run_command({ "init", vault_path }, callback)
-end
-
+--- Index the vault.
+---@param force boolean Whether to force full reindex
+---@param callback fun(err: string|nil, data: string|nil)
 function M.index_vault(force, callback)
-  local args = { "index", get_vault_path() }
+  local config = require("snot").get_config()
+  local args = { "index", config.vault_path }
   if force then
     table.insert(args, "--force")
   end
-  M.run_command(args, callback)
+  M.run_command(args, {}, callback)
 end
 
+--- Create a note via CLI.
+---@param name string Note title
+---@param callback fun(err: string|nil, data: table|nil)
 function M.create_note(name, callback)
-  M.run_command({ "create", get_vault_path(), name }, function(err, output)
-    if err then
-      callback(err, nil)
-      return
-    end
-
-    local json_str = table.concat(output, "")
-    local ok, result = pcall(vim.fn.json_decode, json_str)
-
-    if ok then
-      callback(nil, result)
-    else
-      callback("Failed to parse JSON response", nil)
-    end
-  end)
+  local config = require("snot").get_config()
+  M.run_command({ "create", config.vault_path, name }, { parse_json = true }, callback)
 end
 
+--- Query notes.
+---@param query string Query string (shorthand or SQL)
+---@param callback fun(err: string|nil, data: table[]|nil)
 function M.query_notes(query, callback)
-  M.run_command({ "query", get_vault_path(), query }, function(err, output)
-    if err then
-      callback(err, nil)
-      return
-    end
-
-    local json_str = table.concat(output, "")
-    local ok, result = pcall(vim.fn.json_decode, json_str)
-
-    if ok then
-      callback(nil, result)
-    else
-      callback("Failed to parse JSON response", nil)
-    end
-  end)
+  local config = require("snot").get_config()
+  M.run_command({ "query", config.vault_path, query }, { parse_json = true }, callback)
 end
 
+--- Get backlinks to a file.
+---@param file_path string Absolute path to the note
+---@param callback fun(err: string|nil, data: table[]|nil)
 function M.get_backlinks(file_path, callback)
-  M.run_command({ "backlinks", get_vault_path(), file_path }, function(err, output)
+  local config = require("snot").get_config()
+  M.run_command({ "backlinks", config.vault_path, file_path }, { parse_json = true }, callback)
+end
+
+--- List all notes (one path per line).
+---@param callback fun(err: string|nil, data: string[]|nil)
+function M.list_notes(callback)
+  local config = require("snot").get_config()
+  M.run_command({ "list", config.vault_path }, {}, function(err, stdout)
     if err then
       callback(err, nil)
       return
     end
-
-    local json_str = table.concat(output, "")
-    local ok, result = pcall(vim.fn.json_decode, json_str)
-
-    if ok then
-      callback(nil, result)
-    else
-      callback("Failed to parse JSON response", nil)
+    local lines = {}
+    for line in stdout:gmatch("[^\n]+") do
+      if line ~= "" then
+        table.insert(lines, line)
+      end
     end
+    callback(nil, lines)
   end)
 end
 
-function M.list_notes(query, callback)
-  local args = { "list", get_vault_path() }
-  if query then
-    table.insert(args, "--query")
-    table.insert(args, query)
-  end
-
-  M.run_command(args, callback)
+--- List all tags.
+---@param callback fun(err: string|nil, data: string[]|nil)
+function M.list_tags(callback)
+  local config = require("snot").get_config()
+  M.run_command({ "tags", config.vault_path }, { parse_json = true }, callback)
 end
 
+--- Get graph neighbors for a note.
+---@param id string Note ID
+---@param depth number Traversal depth
+---@param callback fun(err: string|nil, data: table[]|nil)
+function M.graph_neighbors(id, depth, callback)
+  local config = require("snot").get_config()
+  M.run_command(
+    { "graph", "neighbors", config.vault_path, id, "--depth", tostring(depth) },
+    { parse_json = true },
+    callback
+  )
+end
+
+--- Get orphaned notes.
+---@param callback fun(err: string|nil, data: table[]|nil)
+function M.graph_orphans(callback)
+  local config = require("snot").get_config()
+  M.run_command({ "graph", "orphans", config.vault_path }, { parse_json = true }, callback)
+end
+
+--- Get graph statistics.
+---@param callback fun(err: string|nil, data: table|nil)
+function M.graph_stats(callback)
+  local config = require("snot").get_config()
+  M.run_command({ "graph", "stats", config.vault_path }, { parse_json = true }, callback)
+end
+
+--- Update a single note in the database.
+---@param file_path string Absolute path to the note
+---@param callback fun(err: string|nil, data: string|nil)
 function M.update_note(file_path, callback)
-  M.run_command({ "update", get_vault_path(), file_path }, callback)
+  local config = require("snot").get_config()
+  M.run_command({ "update", config.vault_path, file_path }, {}, callback)
 end
 
 return M

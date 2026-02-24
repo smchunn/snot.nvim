@@ -1,60 +1,26 @@
 local M = {}
 
-local config = {
-  vault_path = vim.fn.getcwd(),
-  snot_bin = "snot",
-  picker = "auto", -- "auto", "fzf-lua", "telescope", or "select"
-}
+---@type SnotConfig|nil
+local _config = nil
 
-local function expand_path(path)
-  if not path then
-    return path
-  end
-  -- Expand ~ to home directory
-  local expanded = vim.fn.expand(path)
-  -- Convert to absolute path
-  return vim.fn.fnamemodify(expanded, ":p")
-end
-
+--- Set up the plugin. Must be called before any commands.
+---@param opts table User configuration
 function M.setup(opts)
-  opts = opts or {}
+  local config_mod = require("snot.config")
+  _config = config_mod.validate(opts)
 
-  -- Expand paths before merging
-  if opts.vault_path then
-    opts.vault_path = expand_path(opts.vault_path)
-  end
-
-  config = vim.tbl_deep_extend("force", config, opts)
-
-  -- Create user commands
-  require("snot.commands").setup(config)
-
-  -- Set up auto-completion
-  if opts.enable_completion ~= false then
-    require("snot.completion").setup()
-
-    -- Try to set up nvim-cmp integration if available
-    pcall(function()
-      require("snot.completion").setup_cmp()
-    end)
-
-    -- Try to set up blink.cmp integration if available
-    pcall(function()
-      require("snot.completion").setup_blink()
-    end)
-  end
-
-  -- Set up autocmd to update cache on save
+  -- Auto-update note on save for markdown files inside the vault
+  local group = vim.api.nvim_create_augroup("SnotAutoUpdate", { clear = true })
   vim.api.nvim_create_autocmd("BufWritePost", {
+    group = group,
     pattern = "*.md",
-    callback = function(args)
-      local file_path = args.file
-      -- Only update if file is in vault
-      if config.vault_path and vim.startswith(file_path, config.vault_path) then
-        local backend = require("snot.backend")
-        backend.update_note(file_path, function(err, _)
+    callback = function(ev)
+      local file = vim.fn.fnamemodify(ev.file, ":p")
+      local vault = _config.vault_path .. "/"
+      if vim.startswith(file, vault) then
+        require("snot.backend").update_note(file, function(err)
           if err then
-            vim.notify("Failed to update note cache: " .. err, vim.log.levels.WARN)
+            vim.notify("[snot] Update failed: " .. err, vim.log.levels.WARN)
           end
         end)
       end
@@ -62,8 +28,13 @@ function M.setup(opts)
   })
 end
 
+--- Get the current config. Errors if setup() hasn't been called.
+---@return SnotConfig
 function M.get_config()
-  return config
+  if not _config then
+    error("snot: setup() must be called before using any commands")
+  end
+  return _config
 end
 
 return M
