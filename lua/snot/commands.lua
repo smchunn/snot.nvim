@@ -51,6 +51,9 @@ local function cmd_new(opts)
       return
     end
 
+    -- Ensure parent directory exists
+    vim.fn.mkdir(vim.fn.fnamemodify(file_path, ":h"), "p")
+
     -- Write file
     local lines = vim.split(content, "\n")
     vim.fn.writefile(lines, file_path)
@@ -104,49 +107,59 @@ local function cmd_new(opts)
   end
 end
 
-local function cmd_find()
-  backend.list_notes(function(err, paths)
-    if err then
-      notify_err("List notes", err)
-      return
-    end
+local function cmd_find(opts)
+  local config = require("snot").get_config()
+  local snot_bin = config.snot_bin
+  local vault_path = config.vault_path
+  local query_parser = require("snot.query")
 
+  --- List all notes for local fuzzy filtering.
+  ---@return table[] items
+  local function list_all_notes()
+    local raw = vim.fn.system({ snot_bin, "list", vault_path })
+    if vim.v.shell_error ~= 0 then
+      return {}
+    end
     local items = {}
-    for _, path in ipairs(paths) do
-      local stem = utils.note_stem(path)
-      table.insert(items, {
-        text = stem .. "  (" .. path .. ")",
-        path = path,
-      })
+    for line in raw:gmatch("[^\n]+") do
+      if line ~= "" then
+        local stem = utils.note_stem(line)
+        table.insert(items, {
+          text = stem .. "  (" .. line .. ")",
+          path = line,
+        })
+      end
     end
-
-    picker.pick(items, { prompt = "Notes" })
-  end)
-end
-
-local function cmd_search(opts)
-  local query = opts.args ~= "" and opts.args or nil
-
-  local function do_search(q)
-    backend.query_notes(q, function(err, notes)
-      if err then
-        notify_err("Search", err)
-        return
-      end
-      picker.pick(notes_to_items(notes), { prompt = "Search: " .. q })
-    end)
+    return items
   end
 
-  if query then
-    do_search(query)
-  else
-    vim.ui.input({ prompt = "Search query: " }, function(input)
-      if not input or input == "" then
-        return
-      end
-      do_search(input)
-    end)
+  --- Run a snot query and return picker items.
+  ---@param snot_query string Translated snot query string
+  ---@return table[] items
+  local function run_query(snot_query)
+    local raw = vim.fn.system({ snot_bin, "query", vault_path, snot_query })
+    if vim.v.shell_error ~= 0 then
+      return {}
+    end
+    local ok, notes = pcall(vim.json.decode, raw)
+    if not ok or type(notes) ~= "table" then
+      return {}
+    end
+    return notes_to_items(notes)
   end
+
+  picker.pick_live({
+    prompt = "Notes",
+    initial_query = opts.args ~= "" and opts.args or nil,
+    search = function(input)
+      local snot_query = query_parser.parse(input)
+      if snot_query then
+        return run_query(snot_query)
+      end
+      -- Plain text (no prefixes) → list all notes, picker fuzzy-filters locally
+      return list_all_notes()
+    end,
+  })
 end
 
 local function cmd_backlinks()
@@ -302,7 +315,6 @@ end
 local handlers = {
   new = cmd_new,
   find = cmd_find,
-  search = cmd_search,
   backlinks = cmd_backlinks,
   index = cmd_index,
   tags = cmd_tags,

@@ -13,11 +13,7 @@ end, { nargs = "?", bang = true, desc = "Create a new note" })
 
 vim.api.nvim_create_user_command("SnotFind", function(opts)
   dispatch("find", opts)
-end, { nargs = 0, desc = "Browse notes via picker" })
-
-vim.api.nvim_create_user_command("SnotSearch", function(opts)
-  dispatch("search", opts)
-end, { nargs = "?", desc = "Search notes with query syntax" })
+end, { nargs = "?", desc = "Browse notes or search with query syntax" })
 
 vim.api.nvim_create_user_command("SnotBacklinks", function(opts)
   dispatch("backlinks", opts)
