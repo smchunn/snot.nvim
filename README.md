@@ -21,7 +21,7 @@ Neovim plugin for [SNOT](https://github.com/smchunn/snot) (Simple Note Organizat
     -- "folke/snacks.nvim",
     -- "nvim-telescope/telescope.nvim",
   },
-  cmd = { "SnotNew", "SnotFind", "SnotSearch", "SnotBacklinks", "SnotIndex", "SnotTags", "SnotGraph", "SnotLink" },
+  cmd = { "SnotNew", "SnotFind", "SnotBacklinks", "SnotIndex", "SnotTags", "SnotGraph", "SnotLink" },
   opts = {
     vault_path = "~/notes",
   },
@@ -33,7 +33,7 @@ Neovim plugin for [SNOT](https://github.com/smchunn/snot) (Simple Note Organizat
 ```lua
 {
   dir = "~/dev/snot.nvim",
-  cmd = { "SnotNew", "SnotFind", "SnotSearch", "SnotBacklinks", "SnotIndex", "SnotTags", "SnotGraph", "SnotLink" },
+  cmd = { "SnotNew", "SnotFind", "SnotBacklinks", "SnotIndex", "SnotTags", "SnotGraph", "SnotLink" },
   opts = {
     vault_path = "~/notes",
   },
@@ -60,9 +60,8 @@ require("snot").setup({
 
 | Command | Args | Bang | Description |
 |---------|------|------|-------------|
+| `:SnotFind [query]` | Optional query | — | Browse and search notes. Plain text fuzzy-filters locally; symbol prefixes query the backend live. |
 | `:SnotNew [name]` | Optional title | `!` picks template | Create a note. Prompts for name if omitted. `SnotNew!` opens template picker first. |
-| `:SnotFind` | — | — | Browse all notes, select to open |
-| `:SnotSearch [query]` | Optional query | — | Search with snot query syntax. Prompts if omitted. |
 | `:SnotBacklinks` | — | — | Show backlinks to the current note |
 | `:SnotIndex` | — | `!` forces reindex | Index the vault. `SnotIndex!` forces full reindex. |
 | `:SnotTags` | — | — | Browse tags. Selecting a tag searches for it. |
@@ -71,22 +70,34 @@ require("snot").setup({
 
 ## Query Syntax
 
-snot supports two query syntaxes, auto-detected:
+`:SnotFind` uses a live picker — results update as you type. **Plain text** (no prefixes) lists all notes and the picker fuzzy-filters locally. **Symbol prefixes** trigger backend queries:
 
-**Shorthand** (quick CLI use):
-```
-tag:work
-#work title:meeting
-~meting              (fuzzy)
-tag:work OR tag:personal
--tag:archived
-```
+| Symbol | Meaning | Example | Translates to |
+|--------|---------|---------|---------------|
+| `#` | Tag | `#work` | `tag:work` |
+| `~` | Fuzzy title | `~meting` | `~meting` |
+| `*` | Full-text content | `*quarterly` | `content:quarterly` |
+| `@` | Links to | `@project-plan` | `links_to:project-plan` |
+| `^` | Orphans | `^` | `orphans` |
+| `!` | Raw passthrough | `!tag:work OR content:plan` | `tag:work OR content:plan` |
 
-**SQL-style** (complex queries):
-```sql
-tags CONTAINS 'work' AND title LIKE '%meeting%'
-fuzzy LIKE 'meting'
-neighbors('project-plan', 2)
+**Combinators:**
+
+| Symbol | Meaning | Example | Translates to |
+|--------|---------|---------|---------------|
+| `\|` | OR | `#work \| #personal` | `tag:work OR tag:personal` |
+| `&` | AND | `#work & *quarterly` | `tag:work content:quarterly` |
+
+Bare words mixed with prefixes default to title search: `#work & hello` becomes `tag:work title:hello`.
+
+**Examples:**
+```
+meeting notes          → fuzzy filter over all notes (local)
+#work                  → backend: tag:work
+#work | ~meeting       → backend: tag:work OR ~meeting
+#work & *quarterly     → backend: tag:work content:quarterly
+^                      → backend: orphans
+!neighbors:note:2      → backend: neighbors:note:2 (raw passthrough)
 ```
 
 ## Templates
